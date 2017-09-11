@@ -14,22 +14,23 @@ use std::str::FromStr;
 use std::string::ParseError;
 use clap::{ArgMatches, AppSettings};
 use serde_json::Value;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use reqwest::Url;
 use std::collections::HashMap;
 use regex::Regex;
+use std::error::Error;
 
-fn main_n() {
+fn main() {
     let args = parse_args();
 
     // todo: be smarter about how we load these. It shouldn't need to wait for the request every time we launch it.
-    let possible_presets = get_presets().expect("couldn't load the presets");
+    let possible_templates = get_all_templates().expect("couldn't load the templates");
 
     match args.subcommand() {
         ("edit", Some(sub_m)) => {}
         ("get", Some(sub_m)) => {
-            let requested_presets: Option<Vec<String>> = sub_m.args
-                .get("presets")
+            let requested_templates: Option<Vec<String>> = sub_m.args
+                .get("templates")
                 .map(|matched_arg| {
                     matched_arg.vals
                         .iter()
@@ -37,17 +38,10 @@ fn main_n() {
                             os_string.clone().into_string().ok())
                         .collect()
                 });
-            do_get(requested_presets, possible_presets);
+            //            do_get(requested_templates, possible_templates);
         }
         _ => {}
     }
-}
-
-fn main(){
-    let url = build_url(vec![String::from("intellij")]).unwrap();
-    println!("url: {}", url);
-    let gitignore = fetch_gitignore(url).unwrap();
-    println!("gitiginore: {:?}", gitignore);
 }
 
 fn parse_args<'a>() -> ArgMatches<'a> {
@@ -57,40 +51,49 @@ fn parse_args<'a>() -> ArgMatches<'a> {
         (author: crate_authors!("\n"))
         (about: "CLI interface to gitignore.io")
         (@subcommand get =>
-            (about: "creates a new .gitignore for a given set of preset keywords")
-            (@arg presets: +multiple "User arguments")
+            (about: "creates a new .gitignore for a given set of template keywords")
+            (@arg templates: +multiple "User arguments")
         )
         (@subcommand edit =>
-            (about: "edit which presets are included in a .gitignore")
+            (about: "edit which templates are included in a .gitignore")
         )
     ).get_matches()
 }
 
-#[derive(Deserialize)]
-struct PresetData {
-    id: String,
-    text: String
+#[derive(Debug, Deserialize)]
+struct TemplateData {
+    #[serde(rename = "fileName")] file_name: String,
+    contents: String,
+    name: String,
 }
 
-fn get_presets() -> Result<Vec<PresetData>, reqwest::Error> {
-    let url = "https://www.gitignore.io/dropdown/templates.json";
-    let mut resp = reqwest::get(url)?;
-    let presets: Vec<PresetData> = resp.json()?;
-    Ok(presets)
+type RemoteTemplates = HashMap<String, TemplateData>;
+
+fn get_all_templates() -> Result<RemoteTemplates, reqwest::Error> {
+    let url = "https://www.gitignore.io/api/list?format=json";
+    let mut templates: RemoteTemplates = match reqwest::get(url) {
+        Ok(mut response) => match response.json() {
+            Ok(json) => json,
+            Err(err) => panic!("couldn't parse the response. Response: {:?}\nError: {}", response, err.description())
+        },
+        Err(err) => panic!("couldn't get the url: {}\nError: {}", url, err.description()),
+    };
+    Ok(templates)
+    //    unimplemented!()
 }
 
-fn do_get(maybe_requested_presets: Option<Vec<String>>, possible_presets: Vec<PresetData>) {
-    // if the user passed in some presets, just get those.
-    // otherwise show the interactive preset picker
-    match maybe_requested_presets {
-        Some(requested_presets) => {}
+fn do_get(maybe_requested_templates: Option<Vec<String>>, possible_templates: Vec<TemplateData>) {
+    // if the user passed in some templates, just get those.
+    // otherwise show the interactive templates picker
+    match maybe_requested_templates {
+        Some(requested_templates) => {}
         None => {}
     }
 }
 
-fn build_url(requested_preset_ids: Vec<String>) -> Result<Url, reqwest::UrlError> {
+fn build_url_for_template(requested_template_ids: Vec<String>) -> Result<Url, reqwest::UrlError> {
     let base_url = "https://www.gitignore.io/api/";
-    let ids = requested_preset_ids.join(",");
+    let ids = requested_template_ids.join(",");
     Url::from_str(&format!("{}{}", base_url, ids))
 }
 
@@ -129,3 +132,37 @@ fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
 }
 
 fn do_edit() { unimplemented!() }
+
+fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HashMap<String, String> {
+    let is_header_regex = Regex::from_str("### .* ###").unwrap();
+
+    all_template_data
+        .iter()
+        .flat_map(|(template_id, template_data)| {
+            template_data.contents.split('\n')
+                .filter(|x| is_header_regex.is_match(x))
+                .map(move |header| (header.to_string(), template_id.clone()))
+        }).collect()
+}
+
+fn load_gitignore(path: std::path::PathBuf) -> Gitignore {
+    unimplemented!()
+}
+
+#[test]
+fn test_can_parse_remote_templates_list() {
+    let templates = get_all_templates().unwrap();
+    let header_to_id_map = make_header_to_id_map(templates);
+//    let test_git_ignore = load_gitignore("test/");
+    println!("{:?}", header_to_id_map);
+}
+
+//#[test]
+fn todo() {
+    unimplemented!();
+    let url = build_url_for_template(vec![String::from("intellij")]).unwrap();
+    println!("url: {}", url);
+    let gitignore = fetch_gitignore(url).unwrap();
+    println!("gitiginore: {:?}", gitignore);
+}
+
