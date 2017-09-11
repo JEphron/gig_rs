@@ -19,6 +19,8 @@ use reqwest::Url;
 use std::collections::HashMap;
 use regex::Regex;
 use std::error::Error;
+use std::fs::File;
+use std::path::{PathBuf, Path};
 
 fn main() {
     let args = parse_args();
@@ -102,6 +104,26 @@ struct Gitignore {
     sections: HashMap<String, Section>
 }
 
+impl Gitignore {
+    fn from_string(contents: String) -> Gitignore {
+        let mut sections: HashMap<String, Section> = HashMap::new();
+        let re = Regex::new("### .* ###").unwrap();
+        let mut active_key: Option<&str> = None;
+        for line in contents.lines() {
+            if re.is_match(line) {
+                active_key = Some(line.trim_matches('#').trim());
+                sections.insert(active_key.unwrap().to_string(), Section { subsections: vec![] });
+            } else {
+                if let Some(key) = active_key {
+                    let section = sections.entry(key.to_string()).or_insert(Section { subsections: vec![] });
+                    section.subsections.push(line.to_string());
+                }
+            }
+        }
+        Gitignore { sections: sections }
+    }
+}
+
 #[derive(Debug)]
 struct Section {
     subsections: Vec<String>
@@ -111,23 +133,7 @@ fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
     let mut resp = reqwest::get(url)?;
     let mut contents = String::new();
     resp.read_to_string(&mut contents);
-    let mut sections: HashMap<String, Section> = HashMap::new();
-    let re = Regex::new("### .* ###").unwrap();
-    let mut active_key: Option<&str> = None;
-
-    for line in contents.lines() {
-        if re.is_match(line) {
-            active_key = Some(line.trim_matches('#').trim());
-            sections.insert(active_key.unwrap().to_string(), Section { subsections: vec![] });
-        } else {
-            if let Some(key) = active_key {
-                let section = sections.entry(key.to_string()).or_insert(Section { subsections: vec![] });
-                section.subsections.push(line.to_string());
-            }
-        }
-    }
-    let mut gitignore = Gitignore { sections: sections };
-
+    let gitignore = Gitignore::from_string(contents);
     Ok(gitignore)
 }
 
@@ -145,16 +151,42 @@ fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HashMap<String, 
         }).collect()
 }
 
-fn load_gitignore(path: std::path::PathBuf) -> Gitignore {
-    unimplemented!()
+
+fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
+    let file_path = dir_path.clone().join("test.gitignore");
+    println!("{}", file_path.display());
+    let mut file = File::open(file_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(Gitignore::from_string(contents))
+}
+
+#[cfg(test)]
+fn setup_header_to_id_map() -> HashMap<String, String> {
+    let templates = get_all_templates().unwrap();
+    make_header_to_id_map(templates)
 }
 
 #[test]
-fn test_can_parse_remote_templates_list() {
-    let templates = get_all_templates().unwrap();
-    let header_to_id_map = make_header_to_id_map(templates);
-//    let test_git_ignore = load_gitignore("test/");
-    println!("{:?}", header_to_id_map);
+fn can_load_test_gitignore() {
+    let mut test_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src") // there's got to be a better way to do this
+        .join("resources")
+        .join("test");
+    let gitignore = load_gitignore(test_directory).unwrap();
+    assert!(gitignore.sections.len() > 0);
+}
+
+#[test]
+fn two_headers_in_the_same_template_map_to_the_same_key() {
+    let header_to_id_map = setup_header_to_id_map();
+    let header_1 = "### Intellij ###";
+    let header_2 = "### Intellij Patch ###";
+    let template_id = "intellij";
+    let id_for_header_1 = header_to_id_map.get(header_1).unwrap();
+    let id_for_header_2 = header_to_id_map.get(header_2).unwrap();
+    assert_eq!(id_for_header_1, template_id);
+    assert_eq!(id_for_header_2, template_id);
 }
 
 //#[test]
