@@ -1,26 +1,26 @@
 //! WIP: An over-the-top gitignore.io command-line interface
 //! With typeahead search and other goodies
+#[macro_use]
+extern crate clap;
 extern crate reqwest;
 extern crate regex;
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
-extern crate clap;
 
+use clap::{ArgMatches, AppSettings};
+use reqwest::Url;
+use regex::Regex;
 use std::io::{self, Read, Write};
 use std::str::FromStr;
 use std::string::ParseError;
-use clap::{ArgMatches, AppSettings};
-use serde_json::Value;
-use serde::{Deserialize, Deserializer};
-use reqwest::Url;
-use std::collections::HashMap;
-use regex::Regex;
 use std::error::Error;
 use std::fs::File;
 use std::path::{PathBuf, Path};
+use std::collections::HashMap;
+use serde_json::Value;
+use serde::{Deserialize, Deserializer};
 
 fn main() {
     let args = parse_args();
