@@ -124,7 +124,7 @@ impl Gitignore {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct Section {
     subsections: Vec<String>
 }
@@ -147,7 +147,7 @@ fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HashMap<String, 
         .flat_map(|(template_id, template_data)| {
             template_data.contents.split('\n')
                 .filter(|x| is_header_regex.is_match(x))
-                .map(move |header| (header.to_string(), template_id.clone()))
+                .map(move |header| (header.trim_matches('#').trim().to_string(), template_id.clone()))
         }).collect()
 }
 
@@ -161,40 +161,114 @@ fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
     Ok(Gitignore::from_string(contents))
 }
 
+enum SectionType {
+    Remote,
+    Local
+}
+
+// we want to see which headers are legit in the gitignore.io remote thingy and which are local
+fn group_sections_by_origin(gitignore: Gitignore, mapping: HashMap<String, String>)
+                            -> HashMap<String, Vec<Section>> {
+    let as_vec: Vec<(String, Section)> = gitignore.sections.into_iter().collect();
+    let grouped = into_group_by(as_vec,
+                                |&(ref header, _)| {
+                                    println!("{}", header);
+                                    match mapping.get(header) {
+                                        Some(id) => id,
+                                        None => "local"
+                                    }
+                                });
+    grouped.into_iter().map(|(x, y)|
+        (x.to_string(),
+         y
+             .into_iter()
+             .map(|z| z.1)
+             .collect::<Vec<Section>>())).collect()
+}
+
+fn group_by<'a, TValue, TKey, TFunc>(list: &'a Vec<TValue>, key: TFunc) -> HashMap<TKey, Vec<&'a TValue>>
+    where TFunc: Fn(&TValue) -> TKey,
+          TKey: Eq + std::hash::Hash {
+    let mut groups: HashMap<TKey, Vec<&'a TValue>> = HashMap::new();
+    for item in list {
+        groups.entry(key(&item)).or_insert(vec![&item]).push(item);
+    }
+    return groups;
+}
+
+
+fn into_group_by<TValue, TKey, TFunc>(list: Vec<TValue>, key: TFunc) -> HashMap<TKey, Vec<TValue>>
+    where TFunc: Fn(&TValue) -> TKey,
+          TKey: Eq + std::hash::Hash {
+    let mut groups: HashMap<TKey, Vec<TValue>> = HashMap::new();
+    for item in list.into_iter() {
+        groups.entry(key(&item)).or_insert(vec![]).push(item);
+    }
+    return groups;
+}
+
 #[cfg(test)]
-fn setup_header_to_id_map() -> HashMap<String, String> {
-    let templates = get_all_templates().unwrap();
-    make_header_to_id_map(templates)
-}
+mod tests {
+    use super::*;
 
-#[test]
-fn can_load_test_gitignore() {
-    let mut test_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src") // there's got to be a better way to do this
-        .join("resources")
-        .join("test");
-    let gitignore = load_gitignore(test_directory).unwrap();
-    assert!(gitignore.sections.len() > 0);
-}
+    fn get_test_directory() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src") // there's got to be a better way to do this
+            .join("resources")
+            .join("test")
+    }
 
-#[test]
-fn two_headers_in_the_same_template_map_to_the_same_key() {
-    let header_to_id_map = setup_header_to_id_map();
-    let header_1 = "### Intellij ###";
-    let header_2 = "### Intellij Patch ###";
-    let template_id = "intellij";
-    let id_for_header_1 = header_to_id_map.get(header_1).unwrap();
-    let id_for_header_2 = header_to_id_map.get(header_2).unwrap();
-    assert_eq!(id_for_header_1, template_id);
-    assert_eq!(id_for_header_2, template_id);
-}
+    fn fake_get_all_templates() -> HashMap<String, TemplateData> {
+        let file_path = get_test_directory().join("api_list_response.json");
+        let mut file = File::open(file_path).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents);
+        serde_json::from_str(&contents).unwrap()
+    }
 
-//#[test]
-fn todo() {
-    unimplemented!();
-    let url = build_url_for_template(vec![String::from("intellij")]).unwrap();
-    println!("url: {}", url);
-    let gitignore = fetch_gitignore(url).unwrap();
-    println!("gitiginore: {:?}", gitignore);
-}
+    fn setup_header_to_id_map() -> HashMap<String, String> {
+        /// real templates go here
+        //         let templates = get_all_templates().unwrap();
+        /// fake templates
+        let templates = fake_get_all_templates();
+        make_header_to_id_map(templates)
+    }
 
+    #[test]
+    fn can_load_test_gitignore() {
+        let mut test_directory = get_test_directory();
+        let gitignore = load_gitignore(test_directory).unwrap();
+        assert!(gitignore.sections.len() > 0);
+    }
+
+    #[test]
+    fn two_headers_in_the_same_template_map_to_the_same_key() {
+        let header_to_id_map = setup_header_to_id_map();
+//        let header_1 = "### Intellij ###";
+//        let header_2 = "### Intellij Patch ###";
+        let header_1 = "Intellij";
+        let header_2 = "Intellij Patch";
+        let template_id = "intellij";
+        let id_for_header_1 = header_to_id_map.get(header_1).unwrap();
+        let id_for_header_2 = header_to_id_map.get(header_2).unwrap();
+        assert_eq!(id_for_header_1, template_id);
+        assert_eq!(id_for_header_2, template_id);
+    }
+
+    #[test]
+    fn can_group_by_origin() {
+        let header_to_id_map = setup_header_to_id_map();
+        let mut test_directory = get_test_directory();
+        let gitignore = load_gitignore(test_directory).unwrap();
+        let group_by_origin = group_sections_by_origin(gitignore, header_to_id_map);
+        println!("{}", serde_json::to_string(&group_by_origin).unwrap());
+    }
+
+    //#[test]
+    //    fn test_something() {
+    //        let url = build_url_for_template(vec![String::from("intellij")]).unwrap();
+    //        println!("url: {}", url);
+    //        let gitignore = fetch_gitignore(url).unwrap();
+    //        println!("gitiginore: {:?}", gitignore);
+    //    }
+}
