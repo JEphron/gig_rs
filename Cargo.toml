@@ -5,6 +5,7 @@ authors = ["JEphron"]
 
 [dependencies]
 clap = "2.26.0"
+itertools = "0.6.2"
 serde = "1.0.12"
 serde_derive = "1.0.12"
 serde_json = "1.0.3"

@@ -84,3 +84,8 @@ Session.vim
 tags
 
 # End of https://www.gitignore.io/api/vim,rust,intellij+all
+
+### Some Local Stuff ###
+# these lines aren't from Gitignore.io
+.foobar/
+*.baz

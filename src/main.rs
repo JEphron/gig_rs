@@ -1,13 +1,15 @@
 //! WIP: An over-the-top gitignore.io command-line interface
 //! With typeahead search and other goodies
-#[macro_use]
-extern crate clap;
 extern crate reqwest;
 extern crate regex;
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate itertools;
 
 use clap::{ArgMatches, AppSettings};
 use reqwest::Url;
@@ -21,6 +23,7 @@ use std::path::{PathBuf, Path};
 use std::collections::HashMap;
 use serde_json::Value;
 use serde::{Deserialize, Deserializer};
+use itertools::Itertools;
 
 fn main() {
     let args = parse_args();
@@ -40,7 +43,6 @@ fn main() {
                             os_string.clone().into_string().ok())
                         .collect()
                 });
-            //            do_get(requested_templates, possible_templates);
         }
         _ => {}
     }
@@ -62,6 +64,17 @@ fn parse_args<'a>() -> ArgMatches<'a> {
     ).get_matches()
 }
 
+fn do_get(maybe_requested_templates: Option<Vec<String>>, possible_templates: Vec<TemplateData>) {
+    // if the user passed in some templates, just get those.
+    // otherwise show the interactive templates picker
+    match maybe_requested_templates {
+        Some(requested_templates) => {}
+        None => {}
+    }
+}
+
+fn do_edit() { unimplemented!() }
+
 #[derive(Debug, Deserialize)]
 struct TemplateData {
     #[serde(rename = "fileName")] file_name: String,
@@ -81,16 +94,20 @@ fn get_all_templates() -> Result<RemoteTemplates, reqwest::Error> {
         Err(err) => panic!("couldn't get the url: {}\nError: {}", url, err.description()),
     };
     Ok(templates)
-    //    unimplemented!()
 }
 
-fn do_get(maybe_requested_templates: Option<Vec<String>>, possible_templates: Vec<TemplateData>) {
-    // if the user passed in some templates, just get those.
-    // otherwise show the interactive templates picker
-    match maybe_requested_templates {
-        Some(requested_templates) => {}
-        None => {}
-    }
+type HeaderToIdMap = HashMap<String, String>;
+
+fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HeaderToIdMap {
+    let is_header_regex = Regex::from_str("###.*###").unwrap();
+
+    all_template_data
+        .iter()
+        .flat_map(|(template_id, template_data)| {
+            template_data.contents.split('\n')
+                .filter(|x| is_header_regex.is_match(x))
+                .map(move |header| (header.to_string(), template_id.clone()))
+        }).collect()
 }
 
 fn build_url_for_template(requested_template_ids: Vec<String>) -> Result<Url, reqwest::UrlError> {
@@ -99,34 +116,85 @@ fn build_url_for_template(requested_template_ids: Vec<String>) -> Result<Url, re
     Url::from_str(&format!("{}{}", base_url, ids))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct Gitignore {
-    sections: HashMap<String, Section>
+    content_groups: Vec<Group>
 }
 
 impl Gitignore {
-    fn from_string(contents: String) -> Gitignore {
-        let mut sections: HashMap<String, Section> = HashMap::new();
-        let re = Regex::new("### .* ###").unwrap();
-        let mut active_key: Option<&str> = None;
-        for line in contents.lines() {
-            if re.is_match(line) {
-                active_key = Some(line.trim_matches('#').trim());
-                sections.insert(active_key.unwrap().to_string(), Section { subsections: vec![] });
-            } else {
-                if let Some(key) = active_key {
-                    let section = sections.entry(key.to_string()).or_insert(Section { subsections: vec![] });
-                    section.subsections.push(line.to_string());
-                }
+    fn set_group_origins(&mut self, mapping: HeaderToIdMap) {
+        use Origin::*;
+        for (key, groups) in &self.content_groups.iter_mut().group_by(|group| mapping.get(&group.header_text)) {
+            for group in groups {
+                group.origin = match key {
+                    Some(remote_id) => Remote { id: remote_id.clone() },
+                    None => Local
+                };
             }
         }
-        Gitignore { sections: sections }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct Section {
-    subsections: Vec<String>
+struct Group {
+    header_text: String,
+    origin: Origin,
+    lines: Vec<(Line, Option<Origin>)>
+}
+
+impl Group {
+    fn with_header_text(header_text: &str) -> Group {
+        Group {
+            header_text: header_text.to_string(),
+            origin: Origin::Unknown,
+            lines: vec![]
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+enum Line {
+    Whitespace,
+    Comment { text: String },
+    Entry { text: String }
+}
+
+impl Line {
+    fn from_str(s: &str) -> Line {
+        if s.trim().is_empty() {
+            Line::Whitespace
+        } else if s.trim().starts_with('#') {
+            Line::Comment { text: s.to_string() }
+        } else {
+            Line::Entry { text: s.to_string() }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+enum Origin {
+    Local,
+    Remote { id: String },
+    Unknown // origin will be unknown until we get a chance to compare against the remote file. Is this necessary?
+}
+
+impl Gitignore {
+    fn from_string(source_string: String) -> Gitignore {
+        let group_header_regex = Regex::new("###.*###").unwrap();
+        let mut groups = vec![];
+        for line in source_string.lines() {
+            if group_header_regex.is_match(line) {
+                groups.push(Group::with_header_text(line));
+            } else {
+                if let Some(ref mut group) = groups.last_mut() {
+                    let line = Line::from_str(line);
+                    let origin = None; // we'll determine the origin when we compare against the remote file
+                    group.lines.push((line, origin));
+                }
+            }
+        }
+        Gitignore { content_groups: groups }
+    }
 }
 
 fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
@@ -135,20 +203,6 @@ fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
     resp.read_to_string(&mut contents);
     let gitignore = Gitignore::from_string(contents);
     Ok(gitignore)
-}
-
-fn do_edit() { unimplemented!() }
-
-fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HashMap<String, String> {
-    let is_header_regex = Regex::from_str("### .* ###").unwrap();
-
-    all_template_data
-        .iter()
-        .flat_map(|(template_id, template_data)| {
-            template_data.contents.split('\n')
-                .filter(|x| is_header_regex.is_match(x))
-                .map(move |header| (header.trim_matches('#').trim().to_string(), template_id.clone()))
-        }).collect()
 }
 
 
@@ -161,51 +215,6 @@ fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
     Ok(Gitignore::from_string(contents))
 }
 
-enum SectionType {
-    Remote,
-    Local
-}
-
-// we want to see which headers are legit in the gitignore.io remote thingy and which are local
-fn group_sections_by_origin(gitignore: Gitignore, mapping: HashMap<String, String>)
-                            -> HashMap<String, Vec<Section>> {
-    let as_vec: Vec<(String, Section)> = gitignore.sections.into_iter().collect();
-    let grouped = into_group_by(as_vec,
-                                |&(ref header, _)| {
-                                    println!("{}", header);
-                                    match mapping.get(header) {
-                                        Some(id) => id,
-                                        None => "local"
-                                    }
-                                });
-    grouped.into_iter().map(|(x, y)|
-        (x.to_string(),
-         y
-             .into_iter()
-             .map(|z| z.1)
-             .collect::<Vec<Section>>())).collect()
-}
-
-fn group_by<'a, TValue, TKey, TFunc>(list: &'a Vec<TValue>, key: TFunc) -> HashMap<TKey, Vec<&'a TValue>>
-    where TFunc: Fn(&TValue) -> TKey,
-          TKey: Eq + std::hash::Hash {
-    let mut groups: HashMap<TKey, Vec<&'a TValue>> = HashMap::new();
-    for item in list {
-        groups.entry(key(&item)).or_insert(vec![&item]).push(item);
-    }
-    return groups;
-}
-
-
-fn into_group_by<TValue, TKey, TFunc>(list: Vec<TValue>, key: TFunc) -> HashMap<TKey, Vec<TValue>>
-    where TFunc: Fn(&TValue) -> TKey,
-          TKey: Eq + std::hash::Hash {
-    let mut groups: HashMap<TKey, Vec<TValue>> = HashMap::new();
-    for item in list.into_iter() {
-        groups.entry(key(&item)).or_insert(vec![]).push(item);
-    }
-    return groups;
-}
 
 #[cfg(test)]
 mod tests {
@@ -226,10 +235,10 @@ mod tests {
         serde_json::from_str(&contents).unwrap()
     }
 
-    fn setup_header_to_id_map() -> HashMap<String, String> {
-        /// real templates go here
+    fn setup_header_to_id_map() -> HeaderToIdMap {
+        // real templates go here
         //         let templates = get_all_templates().unwrap();
-        /// fake templates
+        // fake templates. todo: mock this somehow
         let templates = fake_get_all_templates();
         make_header_to_id_map(templates)
     }
@@ -238,16 +247,14 @@ mod tests {
     fn can_load_test_gitignore() {
         let mut test_directory = get_test_directory();
         let gitignore = load_gitignore(test_directory).unwrap();
-        assert!(gitignore.sections.len() > 0);
+        assert!(gitignore.content_groups.len() > 0);
     }
 
     #[test]
     fn two_headers_in_the_same_template_map_to_the_same_key() {
         let header_to_id_map = setup_header_to_id_map();
-//        let header_1 = "### Intellij ###";
-//        let header_2 = "### Intellij Patch ###";
-        let header_1 = "Intellij";
-        let header_2 = "Intellij Patch";
+        let header_1 = "### Intellij ###";
+        let header_2 = "### Intellij Patch ###";
         let template_id = "intellij";
         let id_for_header_1 = header_to_id_map.get(header_1).unwrap();
         let id_for_header_2 = header_to_id_map.get(header_2).unwrap();
@@ -259,9 +266,10 @@ mod tests {
     fn can_group_by_origin() {
         let header_to_id_map = setup_header_to_id_map();
         let mut test_directory = get_test_directory();
-        let gitignore = load_gitignore(test_directory).unwrap();
-        let group_by_origin = group_sections_by_origin(gitignore, header_to_id_map);
-        println!("{}", serde_json::to_string(&group_by_origin).unwrap());
+        let mut gitignore = load_gitignore(test_directory).unwrap();
+        //        let group_by_origin = group_sections_by_origin(gitignore, header_to_id_map);
+        gitignore.set_group_origins(header_to_id_map);
+        //        println!("{}", serde_json::to_string(&group_by_origin).unwrap());
     }
 
     //#[test]
