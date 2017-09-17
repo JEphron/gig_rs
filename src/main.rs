@@ -210,7 +210,7 @@ fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
 
 
 fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
-    let file_path = dir_path.clone().join("test.gitignore");
+    let file_path = dir_path.clone().join(".gitignore");
     let mut file = File::open(file_path)?;
     Ok(Gitignore::from_readable(&mut file))
 }
