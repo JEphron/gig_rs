@@ -122,6 +122,29 @@ struct Gitignore {
 }
 
 impl Gitignore {
+    fn from_readable(source_readable: &mut Read) -> Gitignore {
+        let mut contents = String::new();
+        source_readable.read_to_string(&mut contents);
+        Self::from_string(contents)
+    }
+
+    fn from_string(source_string: String) -> Gitignore {
+        let group_header_regex = Regex::new("###.*###").unwrap();
+        let mut groups = vec![];
+        for line in source_string.lines() {
+            if group_header_regex.is_match(line) {
+                groups.push(Group::with_header_text(line));
+            } else {
+                if let Some(ref mut group) = groups.last_mut() {
+                    let line = Line::from_str(line);
+                    let origin = None; // we'll determine the origin when we compare against the remote file
+                    group.lines.push((line, origin));
+                }
+            }
+        }
+        Gitignore { content_groups: groups }
+    }
+
     fn set_group_origins(&mut self, mapping: HeaderToIdMap) {
         use Origin::*;
         for (key, groups) in &self.content_groups.iter_mut().group_by(|group| mapping.get(&group.header_text)) {
@@ -134,6 +157,7 @@ impl Gitignore {
         }
     }
 }
+
 
 #[derive(Debug, Serialize)]
 struct Group {
@@ -178,41 +202,17 @@ enum Origin {
     Unknown // origin will be unknown until we get a chance to compare against the remote file. Is this necessary?
 }
 
-impl Gitignore {
-    fn from_string(source_string: String) -> Gitignore {
-        let group_header_regex = Regex::new("###.*###").unwrap();
-        let mut groups = vec![];
-        for line in source_string.lines() {
-            if group_header_regex.is_match(line) {
-                groups.push(Group::with_header_text(line));
-            } else {
-                if let Some(ref mut group) = groups.last_mut() {
-                    let line = Line::from_str(line);
-                    let origin = None; // we'll determine the origin when we compare against the remote file
-                    group.lines.push((line, origin));
-                }
-            }
-        }
-        Gitignore { content_groups: groups }
-    }
-}
-
 fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
     let mut resp = reqwest::get(url)?;
-    let mut contents = String::new();
-    resp.read_to_string(&mut contents);
-    let gitignore = Gitignore::from_string(contents);
+    let gitignore = Gitignore::from_readable(&mut resp);
     Ok(gitignore)
 }
 
 
 fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
     let file_path = dir_path.clone().join("test.gitignore");
-    println!("{}", file_path.display());
     let mut file = File::open(file_path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(Gitignore::from_string(contents))
+    Ok(Gitignore::from_readable(&mut file))
 }
 
 
