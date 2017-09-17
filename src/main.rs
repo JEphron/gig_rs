@@ -99,13 +99,12 @@ fn get_all_templates() -> Result<RemoteTemplates, reqwest::Error> {
 type HeaderToIdMap = HashMap<String, String>;
 
 fn make_header_to_id_map(all_template_data: RemoteTemplates) -> HeaderToIdMap {
-    let is_header_regex = Regex::from_str("###.*###").unwrap();
-
+    let group_header_regex = Regex::from_str("###.*###").unwrap();
     all_template_data
         .iter()
         .flat_map(|(template_id, template_data)| {
             template_data.contents.split('\n')
-                .filter(|x| is_header_regex.is_match(x))
+                .filter(|x| group_header_regex.is_match(x))
                 .map(move |header| (header.to_string(), template_id.clone()))
         }).collect()
 }
