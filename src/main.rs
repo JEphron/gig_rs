@@ -122,12 +122,6 @@ struct Gitignore {
 }
 
 impl Gitignore {
-    fn from_readable(source_readable: &mut Read) -> Gitignore {
-        let mut contents = String::new();
-        source_readable.read_to_string(&mut contents);
-        Self::from_string(contents)
-    }
-
     fn from_string(source_string: String) -> Gitignore {
         let group_header_regex = Regex::new("###.*###").unwrap();
         let mut groups = vec![];
@@ -155,6 +149,14 @@ impl Gitignore {
                 };
             }
         }
+    }
+}
+
+impl<T: Read> From<T> for Gitignore {
+    fn from(mut source: T) -> Self {
+        let mut contents = String::new();
+        source.read_to_string(&mut contents);
+        Self::from_string(contents)
     }
 }
 
@@ -204,15 +206,14 @@ enum Origin {
 
 fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
     let mut resp = reqwest::get(url)?;
-    let gitignore = Gitignore::from_readable(&mut resp);
-    Ok(gitignore)
+    Ok(Gitignore::from(resp))
 }
 
 
 fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
     let file_path = dir_path.clone().join(".gitignore");
     let mut file = File::open(file_path)?;
-    Ok(Gitignore::from_readable(&mut file))
+    Ok(Gitignore::from(file))
 }
 
 
