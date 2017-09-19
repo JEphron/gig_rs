@@ -2,6 +2,7 @@
 //! With typeahead search and other goodies
 extern crate reqwest;
 extern crate regex;
+extern crate termion;
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
@@ -14,7 +15,7 @@ extern crate itertools;
 use clap::{ArgMatches, AppSettings};
 use reqwest::Url;
 use regex::Regex;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, stdout, Stdin, Stdout, StdoutLock};
 use std::str::FromStr;
 use std::string::ParseError;
 use std::error::Error;
@@ -24,6 +25,12 @@ use std::collections::HashMap;
 use serde_json::Value;
 use serde::{Deserialize, Deserializer};
 use itertools::Itertools;
+use std::thread;
+use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
+use termion::raw::{IntoRawMode, RawTerminal};
+use termion::input::TermRead;
+use termion::{color, style, cursor};
 
 fn main() {
     let args = parse_args();
@@ -32,7 +39,9 @@ fn main() {
     let possible_templates = get_all_templates().expect("couldn't load the templates");
 
     match args.subcommand() {
-        ("edit", Some(sub_m)) => {}
+        ("edit", Some(sub_m)) => {
+            do_edit();
+        }
         ("get", Some(sub_m)) => {
             let requested_templates: Option<Vec<String>> = sub_m.args
                 .get("templates")
@@ -73,9 +82,158 @@ fn do_get(maybe_requested_templates: Option<Vec<String>>, possible_templates: Ve
     }
 }
 
-fn do_edit() { unimplemented!() }
+#[derive(Debug, Clone)]
+enum RequestType {
+    Templates(RemoteTemplates)
+}
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
+enum EditEvent {
+    Key(termion::event::Key),
+    RequestComplete(RequestType),
+    Break
+}
+
+fn async_get_all_templates(outbox: Sender<EditEvent>) {
+    use EditEvent::*;
+    use RequestType::*;
+    thread::spawn(move || {
+        let templates = get_all_templates();
+        if let Ok(templates) = templates {
+            outbox.send(RequestComplete(Templates(templates)));
+        }
+    });
+}
+
+struct EditState {
+    highlighted_row: i32,
+    row_open: bool
+}
+
+impl EditState {
+    fn new() -> Self {
+        EditState {
+            highlighted_row: 0,
+            row_open: false
+        }
+    }
+
+    fn move_selection_up(&mut self) {
+        self.highlighted_row += 1;
+    }
+
+    fn move_selection_down(&mut self) {
+        self.highlighted_row -= 1;
+    }
+
+    fn open_selection(&mut self) {
+        self.row_open = true;
+    }
+
+    fn close_selection(&mut self) {
+        self.row_open = false;
+    }
+}
+
+fn do_edit() {
+    use termion::event::Key::*;
+    use EditEvent::*;
+    use RequestType::*;
+
+    let (events_outbox, events_inbox) = mpsc::channel::<EditEvent>();
+
+
+    let stdout = stdout();
+    let mut wrapion = Wrapion::new(stdout.lock());
+    async_get_all_templates(events_outbox.clone());
+    wrapion.async_key_events(events_outbox.clone());
+
+    let mut state = EditState::new();
+
+    wrapion.clear();
+    draw_gui(&mut wrapion);
+    // note, suspect that println! will deadlock since we took out a permanent lock on stdout
+    loop {
+        let event = events_inbox.recv();
+        wrapion.println(&format!("{:?}", event));
+        match event.unwrap_or(Break) {
+            Key(key) => match key {
+                Up => state.move_selection_up(),
+                Down => state.move_selection_down(),
+                Left => state.close_selection(),
+                Right => state.open_selection(),
+                _ => {}
+            },
+            RequestComplete(request_type) => match request_type {
+                Templates(templates) => update_templates(templates)
+            },
+            Break => { break }
+        }
+
+        draw_gui(&mut wrapion);
+    }
+}
+
+fn draw_gui<W: Write>(wrapion: &mut Wrapion<W>) {
+    wrapion.println("yeah");
+}
+
+struct Wrapion<W: Write> {
+    _guard: termion::PreInitState,
+    stdout: W,
+}
+
+impl<W: Write> Wrapion<W> {
+    fn new(stdout: W) -> Wrapion<RawTerminal<W>> {
+        Wrapion {
+            _guard: termion::init(),
+            stdout: stdout.into_raw_mode().unwrap(),
+        }
+    }
+
+    fn println(&mut self, output: &str) {
+        writeln!(self.stdout, "{}", output);
+        self.stdout.flush();
+    }
+
+    fn async_key_events(&mut self, f: Sender<EditEvent>) {
+        use termion::async_stdin;
+        thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut keys = stdin.lock().keys();
+            loop {
+                let key_result = keys.next();
+                if let Some(Ok(key)) = key_result {
+                    f.send(EditEvent::Key(key));
+                }
+            }
+        });
+    }
+
+    fn clear(&mut self) {
+        write!(self.stdout, "{}{}yo yo yo",
+               termion::clear::All,
+               termion::cursor::Goto(1, 1))
+            .unwrap();
+        self.stdout.flush();
+    }
+}
+
+impl<W: Write> Drop for Wrapion<W> {
+    fn drop(&mut self) {
+        write!(self.stdout, "{}{}{}{}",
+               color::Bg(color::Reset),
+               color::Fg(color::Reset),
+               style::Reset,
+               cursor::Show
+        );
+        self.stdout.flush();
+    }
+}
+
+fn update_templates(templates: RemoteTemplates) {}
+
+#[derive(Debug, Deserialize, Clone)]
 struct TemplateData {
     #[serde(rename = "fileName")] file_name: String,
     contents: String,
@@ -121,21 +279,19 @@ struct Gitignore {
 }
 
 impl Gitignore {
-    fn from_string(source_string: String) -> Gitignore {
-        let group_header_regex = Regex::new("###.*###").unwrap();
-        let mut groups = vec![];
-        for line in source_string.lines() {
-            if group_header_regex.is_match(line) {
-                groups.push(Group::with_header_text(line));
-            } else {
-                if let Some(ref mut group) = groups.last_mut() {
-                    let line = Line::from_str(line);
-                    let origin = None; // we'll determine the origin when we compare against the remote file
-                    group.lines.push((line, origin));
-                }
+    fn local<T: Into<Gitignore>>(source: T) -> Self {
+        let mut gitignore = source.into();
+        gitignore.uniform_origin(Origin::Local);
+        gitignore
+    }
+
+    fn uniform_origin(&mut self, origin: Origin) {
+        for group in self.content_groups.iter_mut() {
+            group.origin = origin.clone();
+            for &mut (_, ref mut line_origin) in group.lines.iter_mut() {
+                *line_origin = origin.clone();
             }
         }
-        Gitignore { content_groups: groups }
     }
 
     fn set_group_origins(&mut self, mapping: HeaderToIdMap) {
@@ -149,26 +305,88 @@ impl Gitignore {
             }
         }
     }
+
+    // big picture. the point of this is for editing a gitignore:
+    // we list the groups, each is marked with a flag (Local, Remote, or Mixed) based on what we determine here
+    // when we go to delete a group, if it is Mixed, we can then prompt the user to see if they want to
+    // either move the changes to a new group, or delete the changes, or cancel the delete.
+    fn compute_diff_against_remote(&mut self, other: &Gitignore) {
+        // todo: rethink this
+        // for each of our groups
+        //   let `other_group` = the corresponding group in `other` if it exists (the corrosponding group is by id)
+        //     for each of our lines where the type is `Entry`
+        //       find the corresponding line in `other_group` if it exists
+        //         if it exists, mark our line's `origin` as `Remote {id}` where id is ?
+        //         otherwise mark our line's `origin` as `Local`
+
+        fn find_corrosponding_group<'a>(group: &Group, others: &'a Vec<Group>) -> Option<&'a Group> {
+            others.iter().find(|x| x.origin == group.origin)
+        }
+
+        fn find_corrosponding_line<'a>(line: &Line, others: &'a Vec<Line>) -> Option<&'a Line> {
+            others.iter().find(|x| *x == line)
+        }
+
+        for our_group in self.content_groups.iter_mut() {
+            let maybe_other_group = find_corrosponding_group(&our_group, &other.content_groups);
+            println!("other_group: {:?}", maybe_other_group);
+            if let Some(ref other_group) = maybe_other_group {
+                for our_line in our_group.lines.iter_mut() {
+                    match our_line.0 {
+                        Line::Entry { .. } => {
+                            let bb = other_group.lines
+                                .iter()
+                                .map(|&(ref line, _)| line.clone())
+                                .collect();
+                            let maybe_other_line = find_corrosponding_line(&our_line.0, &bb);
+                            match maybe_other_line {
+                                Some(other_line) => { our_line.1 = Origin::Remote { id: String::new() } } // todo: what goes here? This doesn't make a lot of sense.
+                                _ => { our_line.1 = Origin::Local }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                // if it doesn't exist, all the lines must be local
+                for &mut (_, ref mut origin) in our_group.lines.iter_mut() {
+                    *origin = Origin::Local;
+                }
+            }
+        }
+    }
 }
 
 impl<T: Read> From<T> for Gitignore {
     fn from(mut source: T) -> Self {
-        let mut contents = String::new();
-        source.read_to_string(&mut contents);
-        Self::from_string(contents)
+        let mut source_string = String::new();
+        source.read_to_string(&mut source_string);
+
+        let group_header_regex = Regex::new("###.*###").unwrap();
+        let mut groups = vec![];
+        for line in source_string.lines() {
+            if group_header_regex.is_match(line) {
+                groups.push(Group::with_header_text(line));
+            } else {
+                if let Some(ref mut group) = groups.last_mut() {
+                    let line = Line::from_str(line);
+                    group.lines.push((line, Origin::Unknown));
+                }
+            }
+        }
+        Gitignore { content_groups: groups }
     }
 }
-
 
 #[derive(Debug, Serialize)]
 struct Group {
     header_text: String,
     origin: Origin,
-    lines: Vec<(Line, Option<Origin>)>
+    lines: Vec<(Line, Origin)>
 }
 
 impl Group {
-    fn with_header_text(header_text: &str) -> Group {
+    fn with_header_text(header_text: &str) -> Self {
         Group {
             header_text: header_text.to_string(),
             origin: Origin::Unknown,
@@ -177,7 +395,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Eq, PartialEq)]
 enum Line {
     Whitespace,
     Comment { text: String },
@@ -185,7 +403,7 @@ enum Line {
 }
 
 impl Line {
-    fn from_str(s: &str) -> Line {
+    fn from_str(s: &str) -> Self {
         if s.trim().is_empty() {
             Line::Whitespace
         } else if s.trim().starts_with('#') {
@@ -196,23 +414,28 @@ impl Line {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq, Hash, Clone)]
 enum Origin {
     Local,
     Remote { id: String },
-    Unknown // origin will be unknown until we get a chance to compare against the remote file. Is this necessary?
+    // id is the gitignore.io id for lines and groups
+    Unknown // origin will be unknown until we get a chance to compare against the remote file. Should we default to Local?
 }
+
+//enum LineOrigin {
+//    Remote,
+//    Local
+//}
 
 fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
     let mut resp = reqwest::get(url)?;
     Ok(Gitignore::from(resp))
 }
 
-
 fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
     let file_path = dir_path.clone().join(".gitignore");
-    let mut file = File::open(file_path)?;
-    Ok(Gitignore::from(file))
+    let file = File::open(file_path)?;
+    Ok(Gitignore::local(file))
 }
 
 
@@ -267,16 +490,20 @@ mod tests {
         let header_to_id_map = setup_header_to_id_map();
         let mut test_directory = get_test_directory();
         let mut gitignore = load_gitignore(test_directory).unwrap();
-        //        let group_by_origin = group_sections_by_origin(gitignore, header_to_id_map);
-        gitignore.set_group_origins(header_to_id_map);
-        //        println!("{}", serde_json::to_string(&group_by_origin).unwrap());
+        gitignore.set_group_origins(header_to_id_map.clone()); //todo: bad!
+        let remote_ids = gitignore.content_groups.iter()
+            .map(|group| &group.origin)
+            .unique()
+            .filter_map(|origin| match origin {
+                &Origin::Remote { ref id } => Some(id.clone()),
+                _ => None
+            }).collect();
+        let url = build_url_for_template(remote_ids).unwrap();
+        println!("url: {:?}", url);
+        let mut remote_gitignore = fetch_gitignore(url).unwrap();
+        remote_gitignore.set_group_origins(header_to_id_map);
+        println!("{}", serde_json::to_string(&remote_gitignore).unwrap());
+        gitignore.compute_diff_against_remote(&remote_gitignore);
+        println!("{}", serde_json::to_string(&gitignore).unwrap());
     }
-
-    //#[test]
-    //    fn test_something() {
-    //        let url = build_url_for_template(vec![String::from("intellij")]).unwrap();
-    //        println!("url: {}", url);
-    //        let gitignore = fetch_gitignore(url).unwrap();
-    //        println!("gitiginore: {:?}", gitignore);
-    //    }
 }
