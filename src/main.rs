@@ -107,14 +107,19 @@ fn async_get_all_templates(outbox: Sender<EditEvent>) {
 
 struct EditState {
     highlighted_row: i32,
-    row_open: bool
+    row_open: bool,
+    gitignore: Gitignore
 }
 
 impl EditState {
     fn new() -> Self {
+        let cwd_path = std::env::current_dir().expect("Could not access the current directory");
+        // todo: if no gitignore exists, prompt to create one
+        let gitignore = load_gitignore(cwd_path).expect("No gitiginore file at your current directory");
         EditState {
             highlighted_row: 0,
-            row_open: false
+            row_open: false,
+            gitignore: gitignore
         }
     }
 
@@ -142,7 +147,6 @@ fn do_edit() {
 
     let (events_outbox, events_inbox) = mpsc::channel::<EditEvent>();
 
-
     let stdout = stdout();
     let mut wrapion = Wrapion::new(stdout.lock());
     async_get_all_templates(events_outbox.clone());
@@ -150,9 +154,9 @@ fn do_edit() {
 
     let mut state = EditState::new();
 
-    wrapion.clear();
-    draw_gui(&mut wrapion);
+    draw_gui(&mut wrapion, &mut state);
     // note, suspect that println! will deadlock since we took out a permanent lock on stdout
+    // janky event loop
     loop {
         let event = events_inbox.recv();
         wrapion.println(&format!("{:?}", event));
@@ -162,6 +166,7 @@ fn do_edit() {
                 Down => state.move_selection_down(),
                 Left => state.close_selection(),
                 Right => state.open_selection(),
+                Char('q') => { break; },
                 _ => {}
             },
             RequestComplete(request_type) => match request_type {
@@ -170,12 +175,15 @@ fn do_edit() {
             Break => { break }
         }
 
-        draw_gui(&mut wrapion);
+        draw_gui(&mut wrapion, &mut state);
     }
 }
 
-fn draw_gui<W: Write>(wrapion: &mut Wrapion<W>) {
-    wrapion.println("yeah");
+fn draw_gui<W: Write>(wrapion: &mut Wrapion<W>, state: &mut EditState) {
+    wrapion.clear();
+    for group in state.gitignore.content_groups.iter() {
+        wrapion.println(&group.header_text);
+    }
 }
 
 struct Wrapion<W: Write> {
@@ -211,7 +219,7 @@ impl<W: Write> Wrapion<W> {
     }
 
     fn clear(&mut self) {
-        write!(self.stdout, "{}{}yo yo yo",
+        write!(self.stdout, "{}{}",
                termion::clear::All,
                termion::cursor::Goto(1, 1))
             .unwrap();
