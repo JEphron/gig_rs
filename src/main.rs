@@ -435,12 +435,6 @@ enum Origin {
     Unknown // origin will be unknown until we get a chance to compare against the remote file. Should we default to Local?
 }
 
-//enum LineOrigin {
-//    Remote,
-//    Local
-//}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
