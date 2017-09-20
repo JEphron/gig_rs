@@ -113,9 +113,12 @@ struct EditState {
 
 impl EditState {
     fn new() -> Self {
-        let cwd_path = std::env::current_dir().expect("Could not access the current directory");
+        let cwd_path = std::env::current_dir()
+            .expect("Could not access the current directory");
+        let gitignore_path = cwd_path.join(".gitignore");
         // todo: if no gitignore exists, prompt to create one
-        let gitignore = load_gitignore(cwd_path).expect("No gitiginore file at your current directory");
+        let gitignore = Gitignore::from_filepath(gitignore_path)
+            .expect("No gitiginore file at your current directory");
         EditState {
             highlighted_row: 0,
             row_open: false,
@@ -166,7 +169,7 @@ fn do_edit() {
                 Down => state.move_selection_down(),
                 Left => state.close_selection(),
                 Right => state.open_selection(),
-                Char('q') => { break; },
+                Char('q') => { break; }
                 _ => {}
             },
             RequestComplete(request_type) => match request_type {
@@ -287,19 +290,21 @@ struct Gitignore {
 }
 
 impl Gitignore {
-    fn local<T: Into<Gitignore>>(source: T) -> Self {
-        let mut gitignore = source.into();
-        gitignore.uniform_origin(Origin::Local);
-        gitignore
-    }
-
-    fn uniform_origin(&mut self, origin: Origin) {
-        for group in self.content_groups.iter_mut() {
-            group.origin = origin.clone();
+    fn from_filepath(file_path: PathBuf) -> Result<Self, std::io::Error> {
+        let file = File::open(file_path)?;
+        let mut gitignore = Gitignore::from(file); // assumption: gitigignores loaded from files are of local origin.
+        for group in gitignore.content_groups.iter_mut() {
+            group.origin = Origin::Local;
             for &mut (_, ref mut line_origin) in group.lines.iter_mut() {
-                *line_origin = origin.clone();
+                *line_origin = Origin::Local;
             }
         }
+        Ok(gitignore)
+    }
+
+    fn from_web(url: Url) -> Result<Self, reqwest::Error> {
+        let resp = reqwest::get(url)?;
+        Ok(Gitignore::from(resp))
     }
 
     fn set_group_origins(&mut self, mapping: HeaderToIdMap) {
@@ -435,17 +440,6 @@ enum Origin {
 //    Local
 //}
 
-fn fetch_gitignore(url: Url) -> Result<Gitignore, reqwest::Error> {
-    let mut resp = reqwest::get(url)?;
-    Ok(Gitignore::from(resp))
-}
-
-fn load_gitignore(dir_path: PathBuf) -> Result<Gitignore, std::io::Error> {
-    let file_path = dir_path.clone().join(".gitignore");
-    let file = File::open(file_path)?;
-    Ok(Gitignore::local(file))
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -477,7 +471,8 @@ mod tests {
     #[test]
     fn can_load_test_gitignore() {
         let mut test_directory = get_test_directory();
-        let gitignore = load_gitignore(test_directory).unwrap();
+        let gitignore_path = test_directory.join(".gitignore");
+        let gitignore = Gitignore::from_filepath(gitignore_path).unwrap();
         assert!(gitignore.content_groups.len() > 0);
     }
 
@@ -497,7 +492,8 @@ mod tests {
     fn can_group_by_origin() {
         let header_to_id_map = setup_header_to_id_map();
         let mut test_directory = get_test_directory();
-        let mut gitignore = load_gitignore(test_directory).unwrap();
+        let gitignore_path = test_directory.join(".gitignore");
+        let mut gitignore = Gitignore::from_filepath(gitignore_path).unwrap();
         gitignore.set_group_origins(header_to_id_map.clone()); //todo: bad!
         let remote_ids = gitignore.content_groups.iter()
             .map(|group| &group.origin)
@@ -508,7 +504,7 @@ mod tests {
             }).collect();
         let url = build_url_for_template(remote_ids).unwrap();
         println!("url: {:?}", url);
-        let mut remote_gitignore = fetch_gitignore(url).unwrap();
+        let mut remote_gitignore = Gitignore::from_web(url).unwrap();
         remote_gitignore.set_group_origins(header_to_id_map);
         println!("{}", serde_json::to_string(&remote_gitignore).unwrap());
         gitignore.compute_diff_against_remote(&remote_gitignore);
